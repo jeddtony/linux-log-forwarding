@@ -1,0 +1,297 @@
+# linux-log-forwarding
+
+
+- name: Setup Auditd and Syslog Forwarding
+  hosts: teleport_targets
+  become: true
+  vars:
+    forwarder_hostname: "{{ groups['syslog_forwarder'][0] }}"
+    nix_system_port: 514
+    auditd_port: 515
+  tasks:
+    - name: Debug forwarder info
+      debug:
+        msg: "Syslog will forward to {{ forwarder_hostname }} on ports {{ nix_system_port }} and {{ auditd_port }}"
+
+    - name: Install auditd (non-Amazon)
+      package:
+        name: auditd
+        state: present
+      when: ansible_distribution != "Amazon"
+
+    - name: Install auditd and rsyslog (Amazon Linux)
+      package:
+        name:
+          - audit
+          - rsyslog
+        state: present
+      when: ansible_distribution == "Amazon"
+
+    - name: Install audispd-plugins
+      package:
+        name: audispd-plugins
+        state: present
+
+    - name: Configure audit rules for b64
+      lineinfile:
+        create: true
+        path: /etc/audit/rules.d/audit.rules
+        line: "-a exit,always -F arch=b64 -S execve"
+      notify: restart auditd
+
+    - name: Configure audit rules for b32
+      lineinfile:
+        create: true
+        path: /etc/audit/rules.d/audit.rules
+        line: "-a exit,always -F arch=b32 -S execve"
+      notify: restart auditd
+
+    - name: Configure audisp syslog plugin settings
+      block:
+        - name: Set active = yes
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^active"
+            line: "active = yes"
+        - name: Set direction = out
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^direction"
+            line: "direction = out"
+        - name: Set path = /sbin/audisp-syslog
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^path"
+            line: "path = /sbin/audisp-syslog"
+        - name: Set type = always
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^type"
+            line: "type = always"
+        - name: Set args = LOG_LOCAL6
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^args"
+            line: "args = LOG_LOCAL6"
+        - name: Set format = string
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^format"
+            line: "format = string"
+      notify: restart auditd
+
+    - name: Allow manual restarts of auditd
+      lineinfile:
+        path: /usr/lib/systemd/system/auditd.service
+        regexp: "^RefuseManualStop"
+        line: "RefuseManualStop=no"
+      when: ansible_service_mgr == "systemd"
+      notify: reload systemd
+
+    - name: Configure rsyslog
+      block:
+        - name: Load imuxsock.so
+          lineinfile:
+            path: /etc/rsyslog.conf
+            line: "$ModLoad imuxsock.so"
+            insertbefore: BOF
+
+        - name: Enable IncludeConfig for /etc/rsyslog.d/*.conf
+          lineinfile:
+            path: /etc/rsyslog.conf
+            line: "$IncludeConfig /etc/rsyslog.d/*.conf"
+            insertafter: EOF
+          when: ansible_distribution == "Amazon"
+
+    - name: Configure rsyslog forwarding
+      block:
+        - name: Backup 50-default.conf
+          copy:
+            src: /etc/rsyslog.d/50-default.conf
+            dest: /etc/rsyslog.d/50-default.conf.bak
+            remote_src: true
+
+        - name: Replace syslog line to exclude local6
+          replace:
+            path: /etc/rsyslog.d/50-default.conf
+            regexp: '^\*\.\*;auth,authpriv.none\s+-/var/log/syslog'
+            replace: '*.info;local6.none;auth,authpriv.none          -/var/log/syslog'
+
+        - name: Ensure auth log line is present
+          lineinfile:
+            path: /etc/rsyslog.d/50-default.conf
+            line: 'auth,authpriv.*                                /var/log/auth.log'
+            state: present
+
+        - name: Insert syslog forwarding lines
+          blockinfile:
+            path: /etc/rsyslog.d/50-default.conf
+            marker: "# {mark} ANSIBLE MANAGED SYSLOG FORWARDING"
+            block: |
+              syslog.*  @@{{ forwarder_ip }}:{{ nix_system_port }} #NIX_SYSTEM PORT
+              auth.*    @@{{ forwarder_ip }}:{{ nix_system_port }} #NIX_SYSTEM PORT
+              local6.*  @@{{ forwarder_ip }}:{{ auditd_port }}     #AUDITD PORT
+
+      notify: restart rsyslog
+
+  handlers:
+    - name: restart auditd
+      service:
+        name: "{{ 'auditd' if ansible_distribution != 'Amazon' else 'audit' }}"
+        state: restarted
+
+    - name: restart rsyslog
+      service:
+        name: rsyslog
+        state: restarted
+
+    - name: reload systemd
+      command: systemctl daemon-reexec
+
+
+    - name: Install auditd (non-Amazon)
+      package:
+        name: auditd
+        state: present
+      when: ansible_distribution != "Amazon"
+
+    - name: Install auditd and rsyslog (Amazon Linux)
+      package:
+        name:
+          - audit
+          - rsyslog
+        state: present
+      when: ansible_distribution == "Amazon"
+
+    - name: Install audispd-plugins
+      package:
+        name: audispd-plugins
+        state: present
+
+    - name: Configure audit rules for b64
+      lineinfile:
+        create: true
+        path: /etc/audit/rules.d/audit.rules
+        line: "-a exit,always -F arch=b64 -S execve"
+      notify: restart auditd
+
+    - name: Configure audit rules for b32
+      lineinfile:
+        create: true
+        path: /etc/audit/rules.d/audit.rules
+        line: "-a exit,always -F arch=b32 -S execve"
+      notify: restart auditd
+
+    - name: Configure audisp syslog plugin settings
+      block:
+        - name: Set active = yes
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^active"
+            line: "active = yes"
+        - name: Set direction = out
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^direction"
+            line: "direction = out"
+        - name: Set path = /sbin/audisp-syslog
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^path"
+            line: "path = /sbin/audisp-syslog"
+        - name: Set type = always
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^type"
+            line: "type = always"
+        - name: Set args = LOG_LOCAL6
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^args"
+            line: "args = LOG_LOCAL6"
+        - name: Set format = string
+          lineinfile:
+            create: true
+            path: "{{ audisp_syslog_conf_path }}"
+            regexp: "^format"
+            line: "format = string"
+      notify: restart auditd
+
+    - name: Allow manual restarts of auditd
+      lineinfile:
+        path: /usr/lib/systemd/system/auditd.service
+        regexp: "^RefuseManualStop"
+        line: "RefuseManualStop=no"
+      when: ansible_service_mgr == "systemd"
+      notify: reload systemd
+
+    - name: Configure rsyslog
+      block:
+        - name: Load imuxsock.so
+          lineinfile:
+            path: /etc/rsyslog.conf
+            line: "$ModLoad imuxsock.so"
+            insertbefore: BOF
+
+        - name: Enable IncludeConfig for /etc/rsyslog.d/*.conf
+          lineinfile:
+            path: /etc/rsyslog.conf
+            line: "$IncludeConfig /etc/rsyslog.d/*.conf"
+            insertafter: EOF
+          when: ansible_distribution == "Amazon"
+
+    - name: Configure rsyslog forwarding
+      block:
+        - name: Backup 50-default.conf
+          copy:
+            src: /etc/rsyslog.d/50-default.conf
+            dest: /etc/rsyslog.d/50-default.conf.bak
+            remote_src: true
+
+        - name: Replace syslog line to exclude local6
+          replace:
+            path: /etc/rsyslog.d/50-default.conf
+            regexp: '^\*\.\*;auth,authpriv.none\s+-/var/log/syslog'
+            replace: '*.info;local6.none;auth,authpriv.none          -/var/log/syslog'
+
+        - name: Ensure auth log line is present
+          lineinfile:
+            path: /etc/rsyslog.d/50-default.conf
+            line: 'auth,authpriv.*                                /var/log/auth.log'
+            state: present
+
+        - name: Insert syslog forwarding lines
+          blockinfile:
+            path: /etc/rsyslog.d/50-default.conf
+            marker: "# {mark} ANSIBLE MANAGED SYSLOG FORWARDING"
+            block: |
+              syslog.*  @@{{ forwarder_ip }}:{{ nix_system_port }} #NIX_SYSTEM PORT
+              auth.*    @@{{ forwarder_ip }}:{{ nix_system_port }} #NIX_SYSTEM PORT
+              local6.*  @@{{ forwarder_ip }}:{{ auditd_port }}     #AUDITD PORT
+
+      notify: restart rsyslog
+
+  handlers:
+    - name: restart auditd
+      service:
+        name: "{{ 'auditd' if ansible_distribution != 'Amazon' else 'audit' }}"
+        state: restarted
+
+    - name: restart rsyslog
+      service:
+        name: rsyslog
+        state: restarted
+
+    - name: reload systemd
+      command: systemctl daemon-reexec
